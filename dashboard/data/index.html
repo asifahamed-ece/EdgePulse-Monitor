@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>EdgePulse — Live Dashboard</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="brand">EdgePulse</div>
+    <div class="badge sim" id="modeBadge">SIMULATED</div>
+    <div class="conn" id="wsStatus"><span class="dot"></span>connecting…</div>
+  </header>
+
+  <div class="banner" id="banner">
+    <span class="state" id="stateText">NORMAL</span>
+    <span class="rule" id="ruleText">all features inside baseline band</span>
+  </div>
+
+  <section class="tiles">
+    <div class="tile"><div class="k">Vibration RMS</div><div class="v" id="vRms">—</div><div class="u">g</div></div>
+    <div class="tile"><div class="k">Motor Temp</div><div class="v" id="vMotor">—</div><div class="u">°C</div></div>
+    <div class="tile"><div class="k">Ambient Temp</div><div class="v" id="vAmb">—</div><div class="u">°C</div></div>
+    <div class="tile"><div class="k">Humidity</div><div class="v" id="vHum">—</div><div class="u">%</div></div>
+    <div class="tile"><div class="k">Temp Δ</div><div class="v" id="vDelta">—</div><div class="u">°C</div></div>
+    <div class="tile"><div class="k">Sample Rate</div><div class="v" id="vHz">—</div><div class="u">Hz</div></div>
+  </section>
+
+  <section class="row meta">
+    <div class="metaItem"><span class="k">recording</span><span id="rec" class="rec">○ idle</span></div>
+    <div class="metaItem"><span class="k">threshold baseline</span><span id="calib" class="warn">—</span></div>
+    <div class="metaItem wide"><span class="k">sensors on the bus</span><span id="sensors">—</span></div>
+  </section>
+
+  <section class="row ctrl">
+    <div class="panel ctrlPanel">
+      <h3>Motor control <span class="hint">ESP32-S3 → L298N, direct</span></h3>
+      <div class="ctrlRow">
+        <button id="btnRun"   class="go">RUN</button>
+        <button id="btnStop"  class="stop">STOP</button>
+        <button id="btnBrake" class="brake">BRAKE</button>
+        <label class="slider">PWM <output id="pwmOut">0</output>
+          <input type="range" id="pwmSlider" min="0" max="255" value="0" step="1">
+        </label>
+      </div>
+      <div class="ctrlRow">
+        <label class="field">run <input id="runIn" value="R001" size="6"></label>
+        <label class="field">condition
+          <select id="condIn">
+            <option>NORMAL</option>
+            <option>SPEED_LOW</option>
+            <option>SPEED_MEDIUM</option>
+            <option>SPEED_HIGH</option>
+          </select>
+        </label>
+        <button id="btnStartRun" class="recBtn">START RUN</button>
+        <button id="btnStopRun"  class="recBtn">STOP RUN</button>
+      </div>
+    </div>
+  </section>
+
+  <section class="row">
+    <div class="panel">
+      <h3>Vibration RMS <span class="hint">window-mean-removed magnitude, real measurement</span></h3>
+      <canvas id="cVib" width="900" height="180"></canvas>
+    </div>
+  </section>
+
+  <section class="row">
+    <div class="panel">
+      <h3>Motor vs Ambient Temperature <span class="hint">°C</span></h3>
+      <canvas id="cTemp" width="900" height="180"></canvas>
+    </div>
+  </section>
+
+  <footer>
+    <span>run <b id="runId">—</b></span>
+    <span>condition <b id="cond">—</b></span>
+    <span>pwm <b id="pwm">—</b></span>
+    <span>dropped <b id="drop">0</b></span>
+    <span class="warn" id="simNote">Values come from the ESP32 over WebSocket. “—” means not measured.</span>
+  </footer>
+</div>
+<script src="/script.js"></script>
+</body>
+</html>
