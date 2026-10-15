@@ -1,0 +1,29 @@
+# ── Build output ───────────────────────────────────────────────────────
+.pio/
+.pioenvs/
+.piolibdeps/
+*.o
+*.elf
+
+# ── Reference repos (large, vendored upstream) ─────────────────────────
+# Cloned for reading patterns, not part of this project's history.
+docs/references/
+
+# ── Recorded data ──────────────────────────────────────────────────────
+# Real measurements are kept, but raw captures can be large. Track the
+# feature CSVs and figures; ignore bulky raw dumps and firmware logs.
+data/raw/*.csv
+data/features/*.csv
+!data/raw/.gitkeep
+!data/features/.gitkeep
+
+# ── Captured baseline ──────────────────────────────────────────────────
+# Measured mu/sigma are committed: they are the evidence behind every
+# threshold in the report.
+tools/baseline.json
+
+# ── Editor / OS ────────────────────────────────────────────────────────
+.vscode/
+.idea/
+.DS_Store
+*~
