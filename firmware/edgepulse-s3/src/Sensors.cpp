@@ -33,7 +33,6 @@ bool Sensors::i2cScan(uint8_t* out, uint8_t max) {
         Wire.beginTransmission(a);
         uint8_t err = Wire.endTransmission();
         if (err == 0) {
-            Serial.printf("  [I2C] ACK at 0x%02X\n", a);
             out[found++] = a;
         }
     }
@@ -46,7 +45,6 @@ bool Sensors::i2cScan(uint8_t* out, uint8_t max) {
             Wire.beginTransmission((uint8_t)addr);
             uint8_t err = Wire.endTransmission();
             if (err == 0) {
-                Serial.printf("  [I2C] ACK at 0x%02X\n", (uint8_t)addr);
                 out[found++] = (uint8_t)addr;
             }
         }
@@ -60,13 +58,6 @@ void Sensors::begin() {
     pinMode(PIN_I2C_SCL, INPUT_PULLUP);
     pinMode(PIN_DS18B20, INPUT_PULLUP);
     pinMode(PIN_DHT22, INPUT_PULLUP);
-    delay(20);
-
-    Serial.printf("[DIAG] GPIO states (with internal pullup):\n");
-    Serial.printf("  SDA (GPIO %d) = %d\n", PIN_I2C_SDA, digitalRead(PIN_I2C_SDA));
-    Serial.printf("  SCL (GPIO %d) = %d\n", PIN_I2C_SCL, digitalRead(PIN_I2C_SCL));
-    Serial.printf("  DS18B20 (GPIO %d) = %d\n", PIN_DS18B20, digitalRead(PIN_DS18B20));
-    Serial.printf("  DHT22 (GPIO %d) = %d\n", PIN_DHT22, digitalRead(PIN_DHT22));
 
     if (!Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL, 100000)) {
         Serial.println("  ! Wire.begin() failed");
@@ -105,66 +96,15 @@ void Sensors::begin() {
 
     if (_mpuPresent) {
         mpu.enableSleep(false);
-        delay(20);
-
-        Wire.beginTransmission(_mpuAddr);
-        Wire.write(0x6B);
-        Wire.endTransmission(false);
-        Wire.requestFrom((uint8_t)_mpuAddr, (uint8_t)1);
-        uint8_t pwr = Wire.available() ? Wire.read() : 0xFF;
-
-        Wire.beginTransmission(_mpuAddr);
-        Wire.write(0x75); // WHO_AM_I
-        Wire.endTransmission(false);
-        Wire.requestFrom((uint8_t)_mpuAddr, (uint8_t)1);
-        uint8_t who = Wire.available() ? Wire.read() : 0xFF;
-
-        Serial.printf("MPU6050 configured: who=0x%02X pwr=0x%02X accel=+-4g gyro=+-500dps filter=44Hz at 0x%02X\n",
-                      who, pwr, _mpuAddr);
     }
 
     // ── DS18B20 ────────────────────────────────────────────────────────
-    pinMode(PIN_DS18B20, INPUT_PULLUP);
-    Serial.println("  probing DS18B20 (1-Wire)...");
-    uint8_t owReset = oneWire.reset();
-    Serial.printf("  OneWire raw reset on GPIO %d returned: %u (1 = presence pulse detected)\n", PIN_DS18B20, owReset);
-
-    uint8_t owRom[8] = {0};
-    oneWire.reset_search();
-    bool foundRom = oneWire.search(owRom);
-    if (foundRom) {
-        Serial.printf("  OneWire ROM found: %02X:%02X:%02X:%02X:%02X:%02X:%02X:%02X\n",
-                      owRom[0], owRom[1], owRom[2], owRom[3], owRom[4], owRom[5], owRom[6], owRom[7]);
-    } else {
-        Serial.println("  OneWire search found no device on GPIO 6.");
-    }
-
     ds18b20.begin();
     ds18b20.setResolution(12);        // 0.0625 °C, ~750 ms conversion
     uint8_t dsCount = ds18b20.getDeviceCount();
     _dsPresent = (dsCount > 0);
-    Serial.printf("  DS18B20 device count: %u\n", dsCount);
 
     // ── DHT22 ──────────────────────────────────────────────────────────
-    pinMode(PIN_DHT22, INPUT_PULLUP);
-    Serial.println("  probing DHT22 on GPIO 7...");
-    pinMode(PIN_DHT22, OUTPUT);
-    digitalWrite(PIN_DHT22, LOW);
-    delay(20); // 20ms start pulse
-    pinMode(PIN_DHT22, INPUT_PULLUP);
-    uint32_t t0 = micros();
-    bool pulledLow = false;
-    uint32_t lowTimeUs = 0;
-    while (micros() - t0 < 500) {
-        if (digitalRead(PIN_DHT22) == 0) {
-            pulledLow = true;
-            lowTimeUs = micros() - t0;
-            break;
-        }
-    }
-    Serial.printf("  DHT22 handshake on GPIO 7: pulledLow=%d at %lu us (expect 1 at 20-50us)\n", pulledLow, (unsigned long)lowTimeUs);
-    delay(100);
-
     dht.begin();
     _dhtPresent = true;               // no addressable ID; validated per read
 
@@ -183,7 +123,14 @@ bool Sensors::readVibration(VibSample& out) {
     if (!_mpuPresent) return false;
 
     sensors_event_t a, g, temp;
-    if (!mpu.getEvent(&a, &g, &temp)) return false;
+    if (!mpu.getEvent(&a, &g, &temp)) {
+        // A bus-level failure. This is the counter that distinguishes
+        // "sensor is broken" from "gate is too strict" — with the old
+        // all-zero rejection the two were indistinguishable.
+        _mpuBusFails++;
+        return false;
+    }
+    _mpuReads++;
 
     // Adafruit library gives acceleration in m/s^2, gyro in rad/s.
     // Convert acceleration to g and gyro to deg/s (dps).
@@ -196,14 +143,23 @@ bool Sensors::readVibration(VibSample& out) {
     const float gy = g.gyro.y * RAD_TO_DEG_F;
     const float gz = g.gyro.z * RAD_TO_DEG_F;
 
-    // Reject all-zero or impossible readings
-    if (fabsf(ax) < 1e-4f && fabsf(ay) < 1e-4f && fabsf(az) < 1e-4f) return false;
+    // ── Sanity gate ────────────────────────────────────────────────────
+    // Rejects NaN and physically impossible values. It must NOT reject
+    // small readings: at rest on a bench the AC vibration can be well
+    // under 1 mg, and rejecting that would report "no data" forever.
+    //
+    // The ±4 g range is enforced by the sensor, so the ceiling here is
+    // generous headroom, not a tuning knob.
     if (!isfinite(ax) || !isfinite(ay) || !isfinite(az) ||
-        !isfinite(gx) || !isfinite(gy) || !isfinite(gz) ||
-        fabsf(ax) > MPU_ABS_LIMIT_G || fabsf(ay) > MPU_ABS_LIMIT_G ||
+        !isfinite(gx) || !isfinite(gy) || !isfinite(gz)) {
+        _mpuRejects++;
+        return false;
+    }
+    if (fabsf(ax) > MPU_ABS_LIMIT_G || fabsf(ay) > MPU_ABS_LIMIT_G ||
         fabsf(az) > MPU_ABS_LIMIT_G ||
         fabsf(gx) > MPU_ABS_LIMIT_DPS || fabsf(gy) > MPU_ABS_LIMIT_DPS ||
         fabsf(gz) > MPU_ABS_LIMIT_DPS) {
+        _mpuRejects++;
         return false;
     }
 
@@ -211,6 +167,15 @@ bool Sensors::readVibration(VibSample& out) {
     out.ax = ax; out.ay = ay; out.az = az;
     out.gx = gx; out.gy = gy; out.gz = gz;
     return true;
+}
+
+// Diagnostic counters, read by the status line. A bus failure and a
+// rejected-but-plausible reading are different faults and must be
+// distinguishable from the outside.
+void Sensors::mpuCounters(uint32_t& reads, uint32_t& busFails, uint32_t& rejects) const {
+    reads    = _mpuReads;
+    busFails = _mpuBusFails;
+    rejects  = _mpuRejects;
 }
 
 // ── DS18B20 — non-blocking, because 750 ms > the 10 ms tick ────────────
