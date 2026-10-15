@@ -69,9 +69,9 @@ void CsvRecorder::writeFrame(const Frame& f) {
     }
     appChar(_buf, _len, ',');
 
-    // Current is behind the CurrentSensor interface (spec §3.3). With the
-    // INA219 deferred the fields stay EMPTY — a blank column is the honest
-    // representation of "not measured". Writing 0.0 would claim zero amps.
+    // Current channel. Blanks when unmeasured — a blank column is the
+    // honest representation of "not measured", whereas 0.0 would assert
+    // that zero amps were observed.
     if (f.have_current) {
         appF(_buf, _len, f.current_A, 4); appChar(_buf, _len, ',');
         appF(_buf, _len, f.bus_V, 3);
