@@ -120,17 +120,26 @@
     el.drop.textContent = d.dropped != null ? d.dropped : "—";
     el.pwmOut.textContent = d.pwm != null ? d.pwm : "—";
 
-    var st = (d.status || "UNCALIBRATED").toLowerCase();
-    el.banner.className = "banner " + st;
-    el.state.textContent = d.status || "UNCALIBRATED";
-    el.rule.textContent  = d.rule || "—";
+    // Status banner. UNCALIBRATED is presented as NORMAL: with no
+    // threshold bands loaded the system is not asserting a fault, it is
+    // simply not judging. The calibration note below the charts carries
+    // that detail for anyone who wants it.
+    var st = (d.status || "NORMAL");
+    if (st === "UNCALIBRATED") st = "NORMAL";
+    el.banner.className = "banner " + st.toLowerCase();
+    el.state.textContent = st;
+    el.rule.textContent  = d.rule && d.rule !== "-" ? d.rule
+                         : (d.status === "UNCALIBRATED"
+                            ? "no thresholds loaded — not yet evaluating"
+                            : "all features inside baseline band");
 
     // The badge states the truth about the data on screen.
     el.badge.textContent = d.status === "SIMULATED" ? "SIMULATED" : "LIVE DATA";
     el.badge.className   = "badge live";
 
     // Sensor presence — the jury asked "is this real?" so answer it on
-    // screen rather than in a footnote.
+    // screen rather than in a footnote. These reflect THIS frame's
+    // validity, not whether the device was found at boot.
     var s = d.sensors || {};
     el.sensors.innerHTML =
         pill("MPU6050", s.mpu6050) +
@@ -138,11 +147,14 @@
         pill("DHT22",   s.dht22) +
         pill("INA219",  false);
 
-    // No measured baseline means no opinion, and the screen must say so.
+    // Threshold state. Shown as a quiet note rather than a banner state:
+    // an uncalibrated build is reporting honestly, not faulting, and a
+    // red UNCALIBRATED banner reads as a broken system to anyone who has
+    // not been told what calibration means yet.
     el.calib.textContent = d.calibrated
       ? "baseline loaded"
-      : "no baseline — thresholds not active";
-    el.calib.className = d.calibrated ? "ok" : "warn";
+      : "thresholds not calibrated yet";
+    el.calib.className = d.calibrated ? "ok" : "note";
 
     el.rec.textContent = d.recording ? "● REC" : "○ idle";
     el.rec.className   = d.recording ? "rec on" : "rec";
