@@ -152,7 +152,7 @@ needed at runtime — every asset is served from the chip's own flash.
 ```
 firmware/edgepulse-s3/     ESP32-S3 firmware (PlatformIO, Arduino framework)
   include/pins.h           Single source of truth for the pin map
-  src/Sensors.*            MPU6050 / DS18B20 / DHT22 drivers
+  src/Sensors.*            MPU6050 / DS18B20 / DHT22 / INA219 drivers
   src/Features.*           Window feature extraction
   src/Rules.*              Threshold evaluation
   src/CsvRecorder.*        Batched CSV logging
@@ -160,9 +160,12 @@ firmware/edgepulse-s3/     ESP32-S3 firmware (PlatformIO, Arduino framework)
   src/TftDisplay.*         Optional ST7789 status display
 dashboard/data/            Web dashboard, served from LittleFS
 docs/                      Design spec, wiring reference
-tools/                     Host-side analysis (feature extraction, calibration)
-data/                      Recorded CSV output
 ```
+
+Recorded runs are written over USB serial to the host rather than committed,
+so there is no `data/` directory in the repository. The host-side analysis
+tooling — feature extraction, baseline calibration, threshold validation — is
+the next piece of work and will live in `tools/`.
 
 ---
 

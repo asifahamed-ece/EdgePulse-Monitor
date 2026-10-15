@@ -10,12 +10,14 @@
 docs/references/
 
 # ── Recorded data ──────────────────────────────────────────────────────
-# Real measurements are kept, but raw captures can be large. Track the
-# feature CSVs and figures; ignore bulky raw dumps and firmware logs.
-data/raw/*.csv
+# Runs are streamed over USB serial to the host, so raw captures normally
+# never land in the repo. These rules cover the case where a CSV is copied
+# in for review: raw dumps and generated figures are bulky, while the
+# extracted feature set is small and worth keeping.
+data/raw/
+data/figures/
+!data/features/
 data/features/*.csv
-!data/raw/.gitkeep
-!data/features/.gitkeep
 
 # ── Captured baseline ──────────────────────────────────────────────────
 # Measured mu/sigma are committed: they are the evidence behind every
