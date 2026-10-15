@@ -22,6 +22,7 @@
 //    task_1wire    polled            DS18B20 (750 ms conversion)
 //    task_rules    on feature        thresholds → status
 //    task_ws       10 Hz             JSON → browser
+//    task_tft      2 Hz  low prio    ST7789 status panel (EDGE_TFT_ENABLED)
 //
 //  NO SYNTHETIC DATA. Every number reaching the dashboard came from a
 //  real sensor read. A sensor that is absent or fails validation leaves
@@ -42,8 +43,13 @@
 #include "Rules.h"
 #include "CsvRecorder.h"
 #include "CurrentSensor.h"
+#include "Ina219.h"
 #include "MotorDriver.h"
 #include "baseline.h"
+// Included unconditionally even though it compiles to nothing when the
+// display is off: it is what defines the EDGE_TFT_ENABLED default that the
+// #if blocks below are evaluated against.
+#include "TftDisplay.h"
 
 // ── Globals shared across tasks ────────────────────────────────────────
 // Access is single-writer / multi-reader and each field is naturally
@@ -78,6 +84,11 @@ static float    gHz            = 0.0f;
 // Latest feature row, for the dashboard and the debug line.
 static Features gFeat{};
 static uint32_t gFeatSeq = 0;
+// Per-frame validity mask, refreshed every acquisition tick so the
+// dashboard and the TFT report what is actually arriving right now.
+static volatile uint8_t gLiveStatus = 0;
+
+// Most recent accepted vibration sample, for the debug/TFT readout.
 static VibSample gLatestVib{};
 
 // ── FreeRTOS handles ───────────────────────────────────────────────────
@@ -138,6 +149,13 @@ static void acqTask(void*) {
         if (f.have_motor_temp)          status |= SENSOR_DS18B20;
         if (f.have_ambient)             status |= SENSOR_DHT22;
         if (f.have_current)             status |= SENSOR_CURRENT;
+
+        // Provenance mask. Written to the frame (so every CSV row records
+        // which channels were valid) and to gLiveStatus (so the dashboard
+        // and the TFT show what is arriving right now, not what was found
+        // at boot). It was previously computed into a local and dropped.
+        f.sensor_status = status;
+        gLiveStatus     = status;
         f.dropped_samples = (acqTicks > acqDone) ? (acqTicks - acqDone) : 0;
 
         if (gRecording) csv.writeFrame(f);
@@ -166,7 +184,8 @@ static void featureTask(void*) {
         // Slow-sensor values are read from cache here — never by a
         // blocking call on this core.
         extractor.compute(WINDOW_SAMPLES, WINDOW_MS, 0,
-                          haveM, mt, haveA, amb, hum, haveI, amps, f);
+                          haveM, mt, haveA, amb, hum, haveI, amps,
+                          volts, watts, f);
         f.sensor_status = sensors.hasMPU6050() ? SENSOR_MPU6050 : 0;
         if (haveM) f.sensor_status |= SENSOR_DS18B20;
         if (haveA) f.sensor_status |= SENSOR_DHT22;
@@ -182,8 +201,10 @@ static void featureTask(void*) {
 
 static void dhtTask(void*) {
     for (;;) {
+        // Sample ahead of the feature window. The DHT22 is read here and
+        // only here; featureTask consumes the cache, so this task must
+        // always run strictly between two window boundaries.
         vTaskDelay(pdMS_TO_TICKS(DHT22_INTERVAL_MS));
-        // The ONLY blocking DHT22 read in the firmware. CORE 0 only.
         static float t, h; static uint32_t a;
         sensors.sampleAmbient(t, h, a);
     }
@@ -284,13 +305,20 @@ static void wsTask(void*) {
         doc["ambient_temp_C"]   = isfinite(f.ambient_temp_C)   ? f.ambient_temp_C   : JsonVariant();
         doc["humidity"]         = isfinite(f.humidity_pct)     ? f.humidity_pct     : JsonVariant();
         doc["temp_delta_C"]     = isfinite(f.temp_delta_C)     ? f.temp_delta_C     : JsonVariant();
-        doc["current_A"]        = JsonVariant();   // INA219 deferred
+        doc["current_A"]        = isfinite(f.current_mean_A) ? f.current_mean_A : JsonVariant();
+        doc["bus_V"]            = isfinite(f.bus_V)          ? f.bus_V          : JsonVariant();
+        doc["power_W"]          = isfinite(f.power_W)        ? f.power_W        : JsonVariant();
 
         JsonObject sens = doc["sensors"].to<JsonObject>();
-        sens["mpu6050"]   = sensors.hasMPU6050();
-        sens["ds18b20"]   = sensors.hasDS18B20();
-        sens["dht22"]     = sensors.hasDHT22();
-        sens["present_mask"] = f.sensor_status;
+        // Per-frame validity, published by acqTask. Reporting boot-time
+        // presence here would show "MPU6050 ok" beside an empty vibration
+        // tile, which reads as a broken dashboard rather than a missing
+        // reading.
+        sens["mpu6050"]   = (gLiveStatus & SENSOR_MPU6050) != 0;
+        sens["ds18b20"]   = (gLiveStatus & SENSOR_DS18B20) != 0;
+        sens["dht22"]     = (gLiveStatus & SENSOR_DHT22)   != 0;
+        sens["ina219"]    = (gLiveStatus & SENSOR_CURRENT) != 0;
+        sens["present_mask"] = gLiveStatus;
 
         String out;
         serializeJson(doc, out);
@@ -350,6 +378,100 @@ static void debugTask(void*) {
     }
 }
 
+#if EDGE_TFT_ENABLED
+// ═══════════════════════════════════════════════════════════════════════
+//  TFT STATUS PANEL — CORE 0, 2 Hz, LOWEST PRIORITY
+//
+//  Placement is the whole design here, and it is the same argument that
+//  keeps the DHT22 off CORE 1: the panel is a slow consumer, so it has no
+//  business near the real-time path.
+//
+//    • tft.begin() runs here, as this task's first action, rather than in
+//      setup(). setup() executes on whichever core Arduino runs loop() on,
+//      so a panel init there is a blocking SPI sequence on the acquisition
+//      core even though no acquisition task exists yet. Here it cannot be:
+//      tftTask is pinned to CORE 0, and the ~400 ms init blocks nothing
+//      that matters.
+//    • show() blocks too — roughly 60-100 ms of SPI per redraw at 16 MHz.
+//      At 2 Hz that is a few percent of CORE 0, and it can delay wsTask by
+//      at most that much. The dashboard staleness watchdog is 3 s.
+//    • Priority 1 puts the panel below rulesTask and wsTask (both 2), so a
+//      redraw can never delay a verdict or a WebSocket push.
+//    • Nothing here writes to gFeat, gStatus, gLiveStatus or any sensor
+//      cache. It reads the same mutex-guarded feature row wsTask reads and
+//      keeps no state of its own.
+// ═══════════════════════════════════════════════════════════════════════
+
+static TftDisplay tft;
+
+static void tftTask(void*) {
+    if (!tft.begin()) {
+        Serial.println("[TFT] init failed — display task parked");
+        for (;;) vTaskDelay(pdMS_TO_TICKS(10000));
+    }
+
+    TickType_t last = xTaskGetTickCount();
+
+    // Measured rate, computed here rather than borrowed from gHz.
+    // wsTask refreshes gHz only inside its own 1-second window AND only
+    // when a dashboard client is connected — with no browser open the
+    // shared value would sit at 0 forever and the panel would report a
+    // 0 Hz sample rate while the machine was running perfectly well. A few
+    // lines of duplication is the cheap price of the display not lying.
+    // Seeded NaN so the panel shows "---" for the first second instead of
+    // asserting a rate nobody has timed yet.
+    float    hz       = NAN;
+    uint32_t lastDone = acqDone, lastT = millis();
+
+    for (;;) {
+        vTaskDelayUntil(&last, pdMS_TO_TICKS(TFT_REDRAW_MS));
+
+        const uint32_t now = millis(), done = acqDone;
+        if (now - lastT >= 1000) {
+            hz = (done - lastDone) * 1000.0f / (float)(now - lastT);
+            lastDone = done;
+            lastT = now;
+        }
+
+        TftSnapshot s{};
+        s.hz         = hz;
+        s.dropped    = gDropped;
+        s.status     = gStatus;
+        s.calibrated = evaluator.calibrated();
+        s.recording  = gRecording;
+        s.live_status = gLiveStatus;
+        snprintf(s.hit_feature, sizeof s.hit_feature, "%s", gHit.feature);
+
+        // The same mutex-guarded copy of the last feature row wsTask takes.
+        // On timeout the snapshot keeps its zeroed members and the panel
+        // draws "---": a copy that could not be taken is shown as absent,
+        // never as a stale number that still looks live.
+        Features f{};
+        if (xSemaphoreTake(mFeature, pdMS_TO_TICKS(5))) {
+            f = gFeat;
+            xSemaphoreGive(mFeature);
+            s.n_samples   = f.n_samples;
+            s.have_window = f.valid;
+            s.vib_rms     = f.vib_rms;
+        }
+
+        // Cache reads, never the blocking ones — the same split Sensors.h
+        // draws for the DHT22. Both success flags come from the reader
+        // itself, so a probe that has never returned cannot borrow the value
+        // from a window where it did.
+        float mt = NAN, amb = NAN, hum = NAN;
+        uint32_t mage = 0, aage = 0;
+        s.have_motor_temp = sensors.readMotorTemp(mt, mage);
+        s.have_ambient    = sensors.readAmbient(amb, hum, aage);
+        s.motor_temp_C    = mt;
+        s.ambient_temp_C  = amb;
+        s.humidity_pct    = hum;
+
+        tft.show(s);
+    }
+}
+#endif  // EDGE_TFT_ENABLED
+
 // ═══════════════════════════════════════════════════════════════════════
 //  MOTOR COMMANDS
 //  Applied and recorded in the same place — the CSV's motor_setting
@@ -401,6 +523,23 @@ void setup() {
     // stopped.
     Serial.println("[1/5] I2C + MPU6050");
     sensors.begin();
+
+    // ── INA219, in series with the motor ──────────────────────────────
+    // Replaces the null sensor through the one-line interface swap. The
+    // shunt value must match the resistor actually fitted on the board.
+    Serial.println("[1b] INA219 current sensor");
+    static Ina219 ina;
+    ina.setShuntOhms(INA219_SHUNT_OHMS);
+    if (ina.begin(INA219_I2C_ADDR)) {
+        setCurrentSensor(&ina);
+        Serial.printf("  %s ok, shunt %.3f ohm, LSB %.2f mA\n",
+                      ina.name(), (double)ina.shuntOhms(),
+                      (double)((10e-6f * 1000.0f) / ina.shuntOhms()));
+    } else {
+        Serial.printf("  INA219 @0x%02X not found — current channel disabled\n",
+                      INA219_I2C_ADDR);
+        setCurrentSensor(nullptr);      // falls back to NullCurrentSensor
+    }
     Serial.printf("I²C devices found: %u (targeted probe 0x68/0x69/0x40)\n",
                   sensors.i2cCount());
     for (uint8_t i = 0; i < sensors.i2cCount() && i < 8; i++) {
@@ -523,6 +662,11 @@ void setup() {
     xTaskCreatePinnedToCore(rulesTask,   "rules",   4096, nullptr, 2, nullptr, 0);
     xTaskCreatePinnedToCore(wsTask,      "ws",      6144, nullptr, 2, nullptr, 0);
     xTaskCreatePinnedToCore(debugTask,   "debug",   4096, nullptr, 1, nullptr, 0);
+#if EDGE_TFT_ENABLED
+    // CORE 0, priority 1 — same tier as the slow sensor tasks. The panel is
+    // a status display and never outranks acquisition, rules or the socket.
+    xTaskCreatePinnedToCore(tftTask,     "tft",     6144, nullptr, 1, nullptr, 0);
+#endif
 
     Serial.println("Tasks started. Send START_RUN over the dashboard to record.");
 }
