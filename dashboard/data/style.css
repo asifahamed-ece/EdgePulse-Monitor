@@ -110,6 +110,7 @@ footer b { color: #58a6ff; }
 .metaItem.wide { flex: 1; }
 .metaItem .k { font-size: 10px; color: #6e7681; text-transform: uppercase; letter-spacing: .6px; }
 .ok { color: #3fb950; font-size: 12px; }
+.note { color: #6e7681; font-size: 12px; font-style: italic; }
 .rec { color: #6e7681; font-size: 12px; }
 .rec.on { color: #f85149; font-size: 12px; font-weight: 700; }
 
