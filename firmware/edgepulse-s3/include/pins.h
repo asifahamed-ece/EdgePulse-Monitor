@@ -116,11 +116,13 @@ static constexpr uint32_t WINDOW_MS      = (WINDOW_SAMPLES * 1000) / HZ;
 // ── Slow-sensor intervals ─────────────────────────────────────────────
 // Real sensor periods. Never pretend these are 100 Hz.
 //
-// The DHT22 interval must be SHORTER than the feature window. With both
-// at 2000 ms, dhtTask and featureTask wake on the same boundary;
-// featureTask runs first (higher priority, different core) and publishes
-// the ambient cache before dhtTask has refreshed it, so roughly half the
-// windows carry a stale or empty ambient/humidity reading. 1200 ms gives
-// a guaranteed 800 ms margin before each 2000 ms window.
+// The DHT22 is a genuinely slow sensor: it self-heats, so it must not be
+// read faster than ~0.5 Hz or the humidity reading is skewed by its own
+// heat. 2000 ms is both the datasheet limit and the library's internal
+// MIN_INTERVAL, so anything faster here buys nothing but jitter.
+//
+// A single read costs ~250 ms of BLOCKING time inside dhtTask on CORE 0.
+// That is why this sensor has its own low-priority task and never runs on
+// the acquisition core — see the task table in main.cpp.
 static constexpr uint32_t DS18B20_INTERVAL_MS = 800;   // 12-bit conversion
-static constexpr uint32_t DHT22_INTERVAL_MS   = 1200;  // < WINDOW_MS, see note
+static constexpr uint32_t DHT22_INTERVAL_MS   = 2000;  // sensor + library limit
