@@ -346,16 +346,30 @@ static void debugTask(void*) {
         float amb, hum; uint32_t aamb = 0;
         bool haveA = sensors.readAmbient(amb, hum, aamb);
 
+        // MPU fault counters, printed only when vibration is down. These
+        // separate the three failure modes: a bus that will not answer, a
+        // sensor answering with implausible data, and a device that has
+        // stopped identifying itself entirely.
+        char fault[80] = "";
+        if (!(gLiveStatus & SENSOR_MPU6050)) {
+            uint32_t rd = 0, bf = 0, rj = 0;
+            sensors.mpuCounters(rd, bf, rj);
+            snprintf(fault, sizeof(fault),
+                     " | mpu alive=%d who=0x%02X reads=%lu bus_fail=%lu reject=%lu",
+                     (int)sensors.mpuAlive(), sensors.mpuWhoAmI(),
+                     (unsigned long)rd, (unsigned long)bf, (unsigned long)rj);
+        }
+
         Serial.printf("[DBG] run=%s cond=%s rec=%d | "
                       "vib=%s motor=%s amb=%s hum=%s | "
-                      "hz=%.1f drop=%lu status=%s rule=%s\n",
+                      "hz=%.1f drop=%lu status=%s rule=%s%s\n",
                       gRunId, gCondition, (int)gRecording,
                       isfinite(f.vib_rms)     ? "OK " : "-- ",
                       haveM ? "OK " : "-- ",
                       haveA ? "OK " : "-- ",
                       haveA ? "OK " : "-- ",
                       (double)gHz, (unsigned long)gDropped,
-                      statusName(gStatus), gHit.feature);
+                      statusName(gStatus), gHit.feature, fault);
 
         Serial.printf("[DBG] vib_rms=%s pp=%s raw=[%.2f,%.2f,%.2f]g motor=%s°C age=%lums "
                       "amb=%s°C hum=%s%% pwm=%u running=%d\n",
