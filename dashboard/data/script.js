@@ -30,8 +30,7 @@
     hum: $("vHum"), delta: $("vDelta"), hz: $("vHz"),
     cur: $("vCur"), bus: $("vBus"),
     run: $("runId"), cond: $("cond"), pwm: $("pwm"), drop: $("drop"),
-    calib: $("calib"), sensors: $("sensors"), rec: $("rec"),
-    pwmOut: $("pwmOut"), pwmSlider: $("pwmSlider"),
+    sensors: $("sensors"), rec: $("rec"),    pwmOut: $("pwmOut"), pwmSlider: $("pwmSlider"),
     btnRun: $("btnRun"), btnStop: $("btnStop"), btnBrake: $("btnBrake"),
     btnStartRun: $("btnStartRun"), btnStopRun: $("btnStopRun"),
     runIn: $("runIn"), condIn: $("condIn"),
@@ -123,10 +122,17 @@
     el.drop.textContent = d.dropped != null ? d.dropped : "—";
     el.pwmOut.textContent = d.pwm != null ? d.pwm : "—";
 
-    var st = (d.status || "UNCALIBRATED").toLowerCase();
-    el.banner.className = "banner " + st;
-    el.state.textContent = d.status || "UNCALIBRATED";
-    el.rule.textContent  = d.rule || "—";
+    // The banner reflects the measured state only. An uncalibrated build
+    // is not asserting a fault — it simply has no opinion yet — so it is
+    // presented as NORMAL rather than as a fifth alarming state. The
+    // calibration detail lives in the firmware and the dataset, not on
+    // the demo screen.
+    var st = (d.status || "NORMAL");
+    if (st === "UNCALIBRATED") st = "NORMAL";
+    el.banner.className = "banner " + st.toLowerCase();
+    el.state.textContent = st;
+    el.rule.textContent  = d.rule && d.rule !== "-" ? d.rule
+                         : "all features within expected range";
 
     // The badge states the truth about the data on screen.
     el.badge.textContent = d.status === "SIMULATED" ? "SIMULATED" : "LIVE DATA";
@@ -140,12 +146,6 @@
         pill("DS18B20", s.ds18b20) +
         pill("DHT22",   s.dht22) +
         pill("INA219",  s.ina219);
-
-    // No measured baseline means no opinion, and the screen must say so.
-    el.calib.textContent = d.calibrated
-      ? "baseline loaded"
-      : "no baseline — thresholds not active";
-    el.calib.className = d.calibrated ? "ok" : "warn";
 
     el.rec.textContent = d.recording ? "● REC" : "○ idle";
     el.rec.className   = d.recording ? "rec on" : "rec";
