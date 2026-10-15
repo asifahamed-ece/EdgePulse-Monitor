@@ -79,6 +79,9 @@ static float    gHz            = 0.0f;
 static Features gFeat{};
 static uint32_t gFeatSeq = 0;
 static VibSample gLatestVib{};
+// Per-frame validity mask, refreshed every acquisition tick so the
+// dashboard reports what is actually arriving right now.
+static volatile uint8_t gLiveStatus = 0;
 
 // ── FreeRTOS handles ───────────────────────────────────────────────────
 static QueueHandle_t   qFeature;      // Features  → task_rules
@@ -99,6 +102,8 @@ static void acqTask(void*) {
         Frame f{};
         f.t_us = esp_timer_get_time();
 
+        // The current channel is read once, here, and its result stored on
+        // the frame. It was previously read in two places.
         float amps, volts, watts;
         bool haveI = currentSensor()->read(amps, volts, watts);
 
@@ -133,11 +138,18 @@ static void acqTask(void*) {
         if (haveI) { f.have_current = true; f.current_A = amps; }
         f.bus_V = volts; f.power_W = watts;
 
+        // Provenance mask. This MUST be written back to the frame — the
+        // per-row validity record in the CSV and the dashboard's sensor
+        // pills both read it. It was previously computed into a local and
+        // discarded, so every logged row claimed sensor_status 0 even while
+        // carrying valid readings.
         uint8_t status = 0;
-        if (f.have_vib)                 status |= SENSOR_MPU6050;
-        if (f.have_motor_temp)          status |= SENSOR_DS18B20;
-        if (f.have_ambient)             status |= SENSOR_DHT22;
-        if (f.have_current)             status |= SENSOR_CURRENT;
+        if (f.have_vib)        status |= SENSOR_MPU6050;
+        if (f.have_motor_temp) status |= SENSOR_DS18B20;
+        if (f.have_ambient)    status |= SENSOR_DHT22;
+        if (f.have_current)    status |= SENSOR_CURRENT;
+        f.sensor_status = status;
+        gLiveStatus     = status;
         f.dropped_samples = (acqTicks > acqDone) ? (acqTicks - acqDone) : 0;
 
         if (gRecording) csv.writeFrame(f);
@@ -214,22 +226,6 @@ static void rulesTask(void*) {
             gFeatSeq++;
             xSemaphoreGive(mFeature);
         }
-
-        // UART debug line — one per 2 s window, cheap enough to read live.
-        if (isfinite(f.vib_rms)) {
-            Serial.printf("[FEAT] vib_rms=%.4f var=%.6f pp=%.4f n=%u/%u "
-                          "motor=%.2f amb=%.2f hum=%.1f st=%s rule=%s\n",
-                          (double)f.vib_rms, (double)f.vib_variance,
-                          (double)f.vib_peak_to_peak,
-                          f.n_samples, (unsigned)WINDOW_SAMPLES,
-                          (double)f.motor_temp_C, (double)f.ambient_temp_C,
-                          (double)f.humidity_pct,
-                          statusName(gStatus), gHit.feature);
-        } else {
-            Serial.printf("[FEAT] no valid vibration data n=%u/%u "
-                          "— sensors absent or rejecting readings\n",
-                          f.n_samples, (unsigned)WINDOW_SAMPLES);
-        }
     }
 }
 
@@ -286,11 +282,16 @@ static void wsTask(void*) {
         doc["temp_delta_C"]     = isfinite(f.temp_delta_C)     ? f.temp_delta_C     : JsonVariant();
         doc["current_A"]        = JsonVariant();   // INA219 deferred
 
+        // Per-frame validity, published by acqTask. The dashboard's sensor
+        // pills must reflect whether THIS reading is real, not whether the
+        // device was found at boot. Reporting boot presence would show
+        // "MPU6050 ok" beside an empty vibration tile, which reads as a
+        // broken dashboard rather than a missing reading.
         JsonObject sens = doc["sensors"].to<JsonObject>();
-        sens["mpu6050"]   = sensors.hasMPU6050();
-        sens["ds18b20"]   = sensors.hasDS18B20();
-        sens["dht22"]     = sensors.hasDHT22();
-        sens["present_mask"] = f.sensor_status;
+        sens["mpu6050"] = (gLiveStatus & SENSOR_MPU6050) != 0;
+        sens["ds18b20"] = (gLiveStatus & SENSOR_DS18B20) != 0;
+        sens["dht22"]   = (gLiveStatus & SENSOR_DHT22)   != 0;
+        sens["present_mask"] = gLiveStatus;
 
         String out;
         serializeJson(doc, out);
@@ -299,56 +300,7 @@ static void wsTask(void*) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-//  UART DEBUG — CORE 0, 2 Hz
-//  Plain human-readable telemetry, independent of CSV recording.
-// ═══════════════════════════════════════════════════════════════════════
 
-static void debugTask(void*) {
-    for (;;) {
-        vTaskDelay(pdMS_TO_TICKS(500));
-
-        Features f{};
-        if (xSemaphoreTake(mFeature, pdMS_TO_TICKS(5))) {
-            f = gFeat;
-            xSemaphoreGive(mFeature);
-        }
-
-        float mt; uint32_t mage = 0;
-        bool haveM = sensors.readMotorTemp(mt, mage);
-        float amb, hum; uint32_t aamb = 0;
-        bool haveA = sensors.readAmbient(amb, hum, aamb);
-
-        Serial.printf("[DBG] run=%s cond=%s rec=%d | "
-                      "vib=%s motor=%s amb=%s hum=%s | "
-                      "hz=%.1f drop=%lu status=%s rule=%s\n",
-                      gRunId, gCondition, (int)gRecording,
-                      isfinite(f.vib_rms)     ? "OK " : "-- ",
-                      haveM ? "OK " : "-- ",
-                      haveA ? "OK " : "-- ",
-                      haveA ? "OK " : "-- ",
-                      (double)gHz, (unsigned long)gDropped,
-                      statusName(gStatus), gHit.feature);
-
-        Serial.printf("[DBG] vib_rms=%s pp=%s raw=[%.2f,%.2f,%.2f]g motor=%s°C age=%lums "
-                      "amb=%s°C hum=%s%% pwm=%u running=%d\n",
-                      isfinite(f.vib_rms) ? String((double)f.vib_rms, 4).c_str() : "n/a",
-                      isfinite(f.vib_peak_to_peak) ? String((double)f.vib_peak_to_peak, 4).c_str() : "n/a",
-                      gLatestVib.ax, gLatestVib.ay, gLatestVib.az,
-                      haveM ? String((double)mt, 2).c_str() : "n/a",
-                      (unsigned long)mage,
-                      haveA ? String((double)amb, 2).c_str() : "n/a",
-                      haveA ? String((double)hum, 1).c_str() : "n/a",
-                      motor.duty(), (int)motor.running());
-
-        Serial.printf("[DBG] sensors: MPU6050=%s(addr 0x%02X) DS18B20=%s "
-                      "DHT22=%s i2c_devices=%u rows=%lu\n",
-                      sensors.hasMPU6050() ? "present" : "ABSENT",
-                      sensors.mpuAddr(),
-                      sensors.hasDS18B20() ? "present" : "ABSENT",
-                      sensors.hasDHT22()   ? "present" : "ABSENT",
-                      sensors.i2cCount(), (unsigned long)csv.rowsWritten());
-    }
-}
 
 // ═══════════════════════════════════════════════════════════════════════
 //  MOTOR COMMANDS
@@ -373,6 +325,71 @@ static void cmdRunMotor(void)  {
 }
 static void cmdStopMotor(void) { motor.stop(); gMotorRun = 0; gMotorPwm = 0; Serial.println("[MOTOR] STOP"); }
 static void cmdBrakeMotor(void){ motor.brake(); gMotorRun = 0; gMotorPwm = 0; Serial.println("[MOTOR] BRAKE"); }
+
+// ═══════════════════════════════════════════════════════════════════════
+//  STATUS LINE — CORE 0, 1 Hz
+//
+//  One line, once a second. Everything a bench session needs to know
+//  without scrolling: which channels are delivering, what the motor is
+//  doing, the sample rate actually achieved, and whether a recording is
+//  running. Replaces the previous three-line [DBG] block, which repeated
+//  unchanged values dozens of times between real changes.
+// ═══════════════════════════════════════════════════════════════════════
+
+static const char* yn(bool v) { return v ? "OK" : "--"; }
+
+static void statusTask(void*) {
+    for (;;) {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+
+        Features f{};
+        if (xSemaphoreTake(mFeature, pdMS_TO_TICKS(5))) {
+            f = gFeat;
+            xSemaphoreGive(mFeature);
+        }
+
+        float mt = NAN; uint32_t mage = 0;
+        bool haveM = sensors.readMotorTemp(mt, mage);
+        float amb = NAN, hum = NAN; uint32_t aamb = 0;
+        bool haveA = sensors.readAmbient(amb, hum, aamb);
+
+        const uint8_t st = gLiveStatus;
+        const bool haveV = (st & SENSOR_MPU6050) != 0;
+        const bool haveCur = (st & SENSOR_CURRENT) != 0;
+
+        char vibBuf[24];
+        if (haveV && isfinite(f.vib_rms)) snprintf(vibBuf, sizeof(vibBuf), "%.4f", (double)f.vib_rms);
+        else                              snprintf(vibBuf, sizeof(vibBuf), "--");
+
+        char motorBuf[20], ambBuf[20], humBuf[16];
+        if (haveM) snprintf(motorBuf, sizeof(motorBuf), "%.2fC", (double)mt);
+        else       snprintf(motorBuf, sizeof(motorBuf), "--");
+        if (haveA) snprintf(ambBuf, sizeof(ambBuf), "%.1fC/%.0f%%", (double)amb, (double)hum);
+        else       snprintf(ambBuf, sizeof(ambBuf), "--");
+        (void)humBuf;
+
+        // MPU fault counters, only surfaced when something is actually
+        // wrong so a healthy run stays a single tidy line.
+        static uint32_t shownBus = 0, shownRej = 0;
+        char fault[48] = "";
+        if (!haveV) {
+            uint32_t rd = 0, bf = 0, rj = 0;
+            sensors.mpuCounters(rd, bf, rj);
+            snprintf(fault, sizeof(fault), " | mpu reads=%lu bus_fail=%lu reject=%lu",
+                     (unsigned long)rd, (unsigned long)bf, (unsigned long)rj);
+            shownBus = bf; shownRej = rj;
+        } else {
+            (void)shownBus; (void)shownRej;
+        }
+
+        Serial.printf("[STATUS] motor=%s vib=%s amb=%s | pwm=%u run=%d | "
+                      "T_motor=%s vib_rms=%s hz=%.1f rec=%d%s\n",
+                      yn(haveM), yn(haveV), yn(haveA),
+                      motor.duty(), (int)motor.running(),
+                      motorBuf, vibBuf, (double)gHz, (int)gRecording, fault);
+        (void)haveCur;
+    }
+}
 
 // ═══════════════════════════════════════════════════════════════════════
 //  SETUP
@@ -522,9 +539,9 @@ void setup() {
     xTaskCreatePinnedToCore(oneWireTask, "1wire",   3072, nullptr, 1, nullptr, 0);
     xTaskCreatePinnedToCore(rulesTask,   "rules",   4096, nullptr, 2, nullptr, 0);
     xTaskCreatePinnedToCore(wsTask,      "ws",      6144, nullptr, 2, nullptr, 0);
-    xTaskCreatePinnedToCore(debugTask,   "debug",   4096, nullptr, 1, nullptr, 0);
+    xTaskCreatePinnedToCore(statusTask,  "status",  4096, nullptr, 1, nullptr, 0);
 
-    Serial.println("Tasks started. Send START_RUN over the dashboard to record.");
+    Serial.println("Tasks started. Type HELP or STATUS for console control.");
 }
 
 void loop() {
@@ -560,8 +577,26 @@ void loop() {
             csv.endRun();
             gRecording = false;
             Serial.println("[CMD] Recording STOPPED");
+        } else if (line.equalsIgnoreCase("STATUS")) {
+            float mt = NAN; uint32_t mage = 0;
+            bool haveM = sensors.readMotorTemp(mt, mage);
+            float amb = NAN, hum = NAN; uint32_t aage = 0;
+            bool haveA = sensors.readAmbient(amb, hum, aage);
+            Features f{};
+            if (xSemaphoreTake(mFeature, pdMS_TO_TICKS(5))) {
+                f = gFeat;
+                xSemaphoreGive(mFeature);
+            }
+            Serial.printf("[STATUS] motor=%s vib=%s amb=%s | pwm=%u run=%d | T_motor=%.2fC vib_rms=%.4f hz=%.1f rec=%d\n",
+                          haveM ? "OK" : "--",
+                          isfinite(f.vib_rms) ? "OK" : "--",
+                          haveA ? "OK" : "--",
+                          motor.duty(), (int)motor.running(),
+                          haveM ? (double)mt : 0.0,
+                          isfinite(f.vib_rms) ? (double)f.vib_rms : 0.0,
+                          (double)gHz, (int)gRecording);
         } else if (line.equalsIgnoreCase("HELP")) {
-            Serial.println("[CMD] Available commands: RUN, STOP, BRAKE, PWM <0-255>, START, END");
+            Serial.println("[CMD] Available commands: RUN, STOP, BRAKE, PWM <0-255>, START, END, STATUS");
         }
     }
 
