@@ -17,8 +17,8 @@ static DallasTemperature  ds18b20(&oneWire);
 // Smallest plausible sanity band for an MPU6050 reading. Values outside
 // this mean the bus is floating or the device is not really there, so we
 // reject the sample rather than log noise as vibration.
-static constexpr float MPU_ABS_LIMIT_G   = 8.0f;
-static constexpr float MPU_ABS_LIMIT_DPS = 400.0f;
+static constexpr float MPU_ABS_LIMIT_G   = 16.0f;
+static constexpr float MPU_ABS_LIMIT_DPS = 1000.0f;
 
 // ── I²C bus scan ───────────────────────────────────────────────────────
 // Addresses this project actually uses. A short targeted list keeps boot
@@ -31,40 +31,46 @@ bool Sensors::i2cScan(uint8_t* out, uint8_t max) {
     for (uint8_t a : KNOWN_ADDRS) {
         if (found >= max) break;
         Wire.beginTransmission(a);
-        if (Wire.endTransmission() == 0) out[found++] = a;
+        uint8_t err = Wire.endTransmission();
+        if (err == 0) {
+            Serial.printf("  [I2C] ACK at 0x%02X\n", a);
+            out[found++] = a;
+        }
     }
 
-    // Full 0x08..0x77 pass only on request — 112 probes x the timeout is
-    // several seconds on an unterminated bus, so it is not on the boot path.
-    if (_fullScan) {
+    if (_fullScan || found == 0) {
         for (uint16_t addr = 0x08; addr <= 0x77 && found < max; addr++) {
             bool known = false;
             for (uint8_t k : KNOWN_ADDRS) if (addr == k) { known = true; break; }
             if (known) continue;
             Wire.beginTransmission((uint8_t)addr);
-            if (Wire.endTransmission() == 0) out[found++] = (uint8_t)addr;
+            uint8_t err = Wire.endTransmission();
+            if (err == 0) {
+                Serial.printf("  [I2C] ACK at 0x%02X\n", (uint8_t)addr);
+                out[found++] = (uint8_t)addr;
+            }
         }
     }
+    _i2cFound = found;
     return found > 0;
 }
 
 void Sensors::begin() {
-    // ── CRITICAL ───────────────────────────────────────────────────────
-    // Enable the internal pull-ups BEFORE initialising the bus.
-    // With no MPU6050 connected and no external 4.7 kΩ fitted, SDA/SCL
-    // float. The I2C master drives SCL low, releases it, then waits for the
-    // line to return high — and it never does, so endTransmission() stalls
-    // and setup() appears to hang. The internal pull-ups are weak (~45 kΩ),
-    // which is exactly why the external 4.7 kΩ must still be fitted in the
-    // final build; they exist here to make an unwired board safe to boot.
     pinMode(PIN_I2C_SDA, INPUT_PULLUP);
     pinMode(PIN_I2C_SCL, INPUT_PULLUP);
+    pinMode(PIN_DS18B20, INPUT_PULLUP);
+    pinMode(PIN_DHT22, INPUT_PULLUP);
+    delay(20);
+
+    Serial.printf("[DIAG] GPIO states (with internal pullup):\n");
+    Serial.printf("  SDA (GPIO %d) = %d\n", PIN_I2C_SDA, digitalRead(PIN_I2C_SDA));
+    Serial.printf("  SCL (GPIO %d) = %d\n", PIN_I2C_SCL, digitalRead(PIN_I2C_SCL));
+    Serial.printf("  DS18B20 (GPIO %d) = %d\n", PIN_DS18B20, digitalRead(PIN_DS18B20));
+    Serial.printf("  DHT22 (GPIO %d) = %d\n", PIN_DHT22, digitalRead(PIN_DHT22));
 
     if (!Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL, 100000)) {
         Serial.println("  ! Wire.begin() failed");
     }
-    // Bound every transaction. The core default is 50 ms, and x112
-    // addresses that is well over five seconds of stalling.
     Wire.setTimeOut(I2C_TIMEOUT_MS);
     Wire.setClock(100000);
 
@@ -73,33 +79,92 @@ void Sensors::begin() {
 
     // ── MPU6050 ────────────────────────────────────────────────────────
     // Address is 0x68 with AD0 low, 0x69 with AD0 high. Try both before
-    // declaring it absent.
+    // declaring it absent. Also try any other I2C address found.
     _mpuPresent = false;
-    for (uint8_t candidate : {0x68, 0x69}) {
-        if (mpu.begin(candidate, &Wire, I2C_TIMEOUT_MS)) {
+    uint8_t candidates[4] = {0x68, 0x69, 0, 0};
+    uint8_t cCount = 2;
+    for (uint8_t i = 0; i < _i2cFound && cCount < 4; i++) {
+        if (_i2cAddr[i] != 0x68 && _i2cAddr[i] != 0x69 && _i2cAddr[i] != 0x40) {
+            candidates[cCount++] = _i2cAddr[i];
+        }
+    }
+
+    for (uint8_t i = 0; i < cCount; i++) {
+        uint8_t candidate = candidates[i];
+        if (candidate == 0) continue;
+        if (mpu.begin(candidate, &Wire)) {
             _mpuPresent = true;
             _mpuAddr = candidate;
+            mpu.enableSleep(false);
+            mpu.setAccelerometerRange(MPU6050_RANGE_4_G);
+            mpu.setGyroRange(MPU6050_RANGE_500_DEG);
+            mpu.setFilterBandwidth(MPU6050_BAND_44_HZ);
             break;
         }
     }
 
-    // Explicit ranges, recorded so the dataset states the settings rather
-    // than leaving them at power-on defaults. The Adafruit Unified Sensor
-    // API fixes these in begin(); they are ±2 g and ±250 °/s by default.
     if (_mpuPresent) {
-        Serial.printf("MPU6050 ranges: accel=+-2g gyro=+-250dps "
-                      "(Unified Sensor defaults)\n");
+        mpu.enableSleep(false);
+        delay(20);
+
+        Wire.beginTransmission(_mpuAddr);
+        Wire.write(0x6B);
+        Wire.endTransmission(false);
+        Wire.requestFrom((uint8_t)_mpuAddr, (uint8_t)1);
+        uint8_t pwr = Wire.available() ? Wire.read() : 0xFF;
+
+        Wire.beginTransmission(_mpuAddr);
+        Wire.write(0x75); // WHO_AM_I
+        Wire.endTransmission(false);
+        Wire.requestFrom((uint8_t)_mpuAddr, (uint8_t)1);
+        uint8_t who = Wire.available() ? Wire.read() : 0xFF;
+
+        Serial.printf("MPU6050 configured: who=0x%02X pwr=0x%02X accel=+-4g gyro=+-500dps filter=44Hz at 0x%02X\n",
+                      who, pwr, _mpuAddr);
     }
 
     // ── DS18B20 ────────────────────────────────────────────────────────
-    // 1-Wire enumeration on a floating DQ is safe but must be bounded: if
-    // no device answers we simply continue without motor temperature.
+    pinMode(PIN_DS18B20, INPUT_PULLUP);
     Serial.println("  probing DS18B20 (1-Wire)...");
+    uint8_t owReset = oneWire.reset();
+    Serial.printf("  OneWire raw reset on GPIO %d returned: %u (1 = presence pulse detected)\n", PIN_DS18B20, owReset);
+
+    uint8_t owRom[8] = {0};
+    oneWire.reset_search();
+    bool foundRom = oneWire.search(owRom);
+    if (foundRom) {
+        Serial.printf("  OneWire ROM found: %02X:%02X:%02X:%02X:%02X:%02X:%02X:%02X\n",
+                      owRom[0], owRom[1], owRom[2], owRom[3], owRom[4], owRom[5], owRom[6], owRom[7]);
+    } else {
+        Serial.println("  OneWire search found no device on GPIO 6.");
+    }
+
     ds18b20.begin();
     ds18b20.setResolution(12);        // 0.0625 °C, ~750 ms conversion
-    _dsPresent = (ds18b20.getDeviceCount() > 0);
+    uint8_t dsCount = ds18b20.getDeviceCount();
+    _dsPresent = (dsCount > 0);
+    Serial.printf("  DS18B20 device count: %u\n", dsCount);
 
     // ── DHT22 ──────────────────────────────────────────────────────────
+    pinMode(PIN_DHT22, INPUT_PULLUP);
+    Serial.println("  probing DHT22 on GPIO 7...");
+    pinMode(PIN_DHT22, OUTPUT);
+    digitalWrite(PIN_DHT22, LOW);
+    delay(20); // 20ms start pulse
+    pinMode(PIN_DHT22, INPUT_PULLUP);
+    uint32_t t0 = micros();
+    bool pulledLow = false;
+    uint32_t lowTimeUs = 0;
+    while (micros() - t0 < 500) {
+        if (digitalRead(PIN_DHT22) == 0) {
+            pulledLow = true;
+            lowTimeUs = micros() - t0;
+            break;
+        }
+    }
+    Serial.printf("  DHT22 handshake on GPIO 7: pulledLow=%d at %lu us (expect 1 at 20-50us)\n", pulledLow, (unsigned long)lowTimeUs);
+    delay(100);
+
     dht.begin();
     _dhtPresent = true;               // no addressable ID; validated per read
 
@@ -117,25 +182,22 @@ void Sensors::begin() {
 bool Sensors::readVibration(VibSample& out) {
     if (!_mpuPresent) return false;
 
-    // The Unified Sensor API exposes the MPU's fixed ±2 g / ±250 °/s
-    // ranges and returns SI units directly (m/s² and rad/s), so the
-    // conversion to g and °/s happens here and is documented rather than
-    // left implicit.
-    sensors_event_t a{}, g{}, t{};
-    if (!mpu.getEvent(&a, &g, &t)) return false;
+    sensors_event_t a, g, temp;
+    if (!mpu.getEvent(&a, &g, &temp)) return false;
 
-    constexpr float M_S2_TO_G   = 1.0f / 9.80665f;
-    constexpr float RAD_TO_DPS  = 57.2957795f;
+    // Adafruit library gives acceleration in m/s^2, gyro in rad/s.
+    // Convert acceleration to g and gyro to deg/s (dps).
+    constexpr float RAD_TO_DEG_F = 57.2957795f;
 
-    const float ax = a.acceleration.x * M_S2_TO_G;
-    const float ay = a.acceleration.y * M_S2_TO_G;
-    const float az = a.acceleration.z * M_S2_TO_G;
-    const float gx = g.gyro.x * RAD_TO_DPS;
-    const float gy = g.gyro.y * RAD_TO_DPS;
-    const float gz = g.gyro.z * RAD_TO_DPS;
+    const float ax = a.acceleration.x / SENSORS_GRAVITY_STANDARD;
+    const float ay = a.acceleration.y / SENSORS_GRAVITY_STANDARD;
+    const float az = a.acceleration.z / SENSORS_GRAVITY_STANDARD;
+    const float gx = g.gyro.x * RAD_TO_DEG_F;
+    const float gy = g.gyro.y * RAD_TO_DEG_F;
+    const float gz = g.gyro.z * RAD_TO_DEG_F;
 
-    // Reject physically impossible readings: a free MPU6050 cannot
-    // exceed ~1 g plus gravity, and cannot spin at 400 °/s stationary.
+    // Reject all-zero or impossible readings
+    if (fabsf(ax) < 1e-4f && fabsf(ay) < 1e-4f && fabsf(az) < 1e-4f) return false;
     if (!isfinite(ax) || !isfinite(ay) || !isfinite(az) ||
         !isfinite(gx) || !isfinite(gy) || !isfinite(gz) ||
         fabsf(ax) > MPU_ABS_LIMIT_G || fabsf(ay) > MPU_ABS_LIMIT_G ||
@@ -193,14 +255,14 @@ bool Sensors::sampleAmbient(float& outTempC, float& outHumidity,
                             uint32_t& outAgeMs) {
     if (!_dhtPresent) { outAgeMs = 0; return false; }
 
-    const float t = dht.readTemperature();   // ~5 ms, non-interruptible
-    const float h = dht.readHumidity();
+    const float t = dht.readTemperature();
+    if (isnan(t) || t < -40.0f || t > 80.0f) {
+        outAgeMs = _ambValid ? (millis() - _ambLastMs) : 0;
+        return false;
+    }
 
-    // The DHT22 reports failure as NaN and protects the payload with a
-    // checksum. Treat NaN, or anything out of physical range, as
-    // "no measurement this cycle" and leave the cache untouched.
-    if (isnan(t) || isnan(h) || t < -40.0f || t > 80.0f ||
-        h < 0.0f || h > 100.0f) {
+    const float h = dht.readHumidity();
+    if (isnan(h) || h < 0.0f || h > 100.0f) {
         outAgeMs = _ambValid ? (millis() - _ambLastMs) : 0;
         return false;
     }
