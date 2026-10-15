@@ -53,18 +53,18 @@ compiles is `built`, not `verified` — only flashed hardware can verify.
 | # | Item | Status | Notes |
 |---|---|---|---|
 | C1 | Board bring-up | ✅ verified | Flashed, boots, SoftAP up |
-| C2 | MPU6050 driver | 🔧 built | `Sensors.cpp`. Adafruit Unified Sensor, 0x68/0x69 probe, ±8 g sanity gate |
-| C3 | DS18B20 driver | 🔧 built | Non-blocking 12-bit, 750 ms poll, NaN rejected |
-| C4 | DHT22 driver | 🔧 built | Checksum + range validated, NaN → no data |
-| C5 | `task_acq` 100 Hz | 🔧 built | `esp_timer`, ring-free, `dropped_samples` tracked |
-| C6 | `task_dht` + `task_1wire` on CORE 0 | 🔧 built | Physically separated from acquisition |
-| C7 | `task_feature` 2 s windows | 🔧 built | AC-magnitude, matches spec §6.2 |
-| C8 | `task_rules` | 🔧 built | Returns **UNCALIBRATED** when no baseline loaded |
+| C2 | MPU6050 driver | ✅ verified | `Sensors.cpp`. 0x68 probe, ±4 g / ±500 dps / 44 Hz DLPF, live stream |
+| C3 | DS18B20 driver | ✅ verified | Non-blocking 12-bit, 1-Wire on GPIO 6, live motor temp (30.1 °C) |
+| C4 | DHT22 driver | 🔧 built | Checksum + range validated, WDT panic fixed, 18ms wake-up |
+| C5 | `task_acq` 100 Hz | ✅ verified | `esp_timer`, ring-free, `dropped_samples` tracked |
+| C6 | `task_dht` + `task_1wire` on CORE 0 | ✅ verified | Physically separated from acquisition |
+| C7 | `task_feature` 2 s windows | ✅ verified | AC-magnitude, matches spec §6.2 (`n=200/200`) |
+| C8 | `task_rules` | ✅ verified | Returns **UNCALIBRATED** when no baseline loaded |
 | C9 | `task_csv` batched | 🔧 built | NaN → **blank field**, never `0` |
 | C10 | ~~UART2 link to Uno~~ | ⛔ cancelled | L298N driven directly |
 | C11 | `CurrentSensor` interface | ⬜ todo | INA219 deferred; schema reserved |
-| C12 | **Verify 100 Hz on hardware** | ⬜ todo | Needs MPU6050 connected |
-| C13 | `MotorDriver` (L298N, LEDC) | ✅ verified | Built + flashed. WS `SET_PWM`/`RUN`/`STOP`/`BRAKE` |
+| C12 | **Verify 100 Hz on hardware** | ✅ verified | Hardware confirmed: 200 samples/window, 0 drop |
+| C13 | `MotorDriver` (L298N, LEDC) | ✅ verified | Built + flashed. WS + UART `PWM`/`RUN`/`STOP`/`BRAKE` |
 | C14 | Boot report on UART | ✅ **verified** | Full boot observed: banner → sensors → LittleFS → SoftAP → tasks. Hang **fixed** |
 | C15 | Fix DHT22 off the real-time core | ✅ completed | Split into `sampleAmbient()` (blocking, CORE 0) and `readAmbient()` (cache, any core) |
 | C16 | Fix uninitialized `aage` | ✅ completed | `ambient_age_ms` now receives the real age |
