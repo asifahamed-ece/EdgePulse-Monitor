@@ -72,7 +72,11 @@ void Sensors::begin() {
         Serial.println("  ! Wire.begin() failed");
     }
     Wire.setTimeOut(I2C_TIMEOUT_MS);
-    Wire.setClock(100000);
+    // 400 kHz. The MPU6050 and INA219 both support it, and a 14-byte read
+    // every 10 ms at 100 kHz was consuming ~14% of the bus before Wi-Fi
+    // traffic joined. 100 kHz was chosen defensively while chasing the
+    // earlier stall and is no longer justified.
+    Wire.setClock(400000);
 
     _i2cFound = 0;
     i2cScan(_i2cAddr, 8);
@@ -178,32 +182,109 @@ void Sensors::begin() {
     }
 }
 
-// ── MPU6050 ────────────────────────────────────────────────────────────
+// ── MPU6050 register burst ─────────────────────────────────────────────
+// WHY THIS IS HAND-ROLLED INSTEAD OF USING A LIBRARY
+//
+// Adafruit_MPU6050::_read() does this:
+//
+//     uint8_t buffer[14];
+//     data_reg.read(buffer, 14);     // ← return status DISCARDED
+//     rawAccX = buffer[0] << 8 | buffer[1];
+//
+// and getEvent() then unconditionally `return true;`.
+//
+// When the I2C transaction fails, `buffer` is never written, its contents
+// are uninitialised stack memory, and that garbage is published as a valid
+// measurement. The library has no way to report a bus error, which is why
+// the fault counters could never move and why the vibration trace sat
+// frozen at one exact triple — a stale buffer being re-read every 10 ms.
+//
+// Reading the registers directly makes the transfer status checkable. A
+// short read is a real failure and is reported as one.
+
+// ACCEL_OUT 0x3B, 14 contiguous bytes through GYRO_ZOUT_L.
+static constexpr uint8_t MPU_REG_WHO_AM_I = 0x75;
+
+// Scale factors must match the ranges configured in begin() (±4 g, ±500 dps).
+// A mismatch scales every feature by a constant factor, which would still
+// look plausible on a chart and be quietly wrong.
+static constexpr float ACCEL_LSB_PER_G  = 8192.0f;   // ±4 g
+static constexpr float GYRO_LSB_PER_DPS = 65.5f;     // ±500 dps
+
 bool Sensors::readVibration(VibSample& out) {
     if (!_mpuPresent) return false;
 
-    sensors_event_t a, g, temp;
-    if (!mpu.getEvent(&a, &g, &temp)) return false;
+    // ── WHO_AM_I liveness, amortised ──────────────────────────────────
+    // Cheap, definitive proof the device is still on the bus. Once every
+    // ~10 s is enough: it detects a disconnected or wedged sensor without
+    // adding a transaction to every 100 Hz sample.
+    const uint32_t now = millis();
+    if (now - _lastWhoCheckMs >= MPU_WHO_INTERVAL_MS) {
+        _lastWhoCheckMs = now;
+        Wire.beginTransmission(_mpuAddr);
+        Wire.write(MPU_REG_WHO_AM_I);
+        if (Wire.endTransmission(false) != 0 ||
+            Wire.requestFrom((uint8_t)_mpuAddr, (uint8_t)1) != 1) {
+            _mpuBusFails++;
+            _alive = false;
+            return false;
+        }
+        const uint8_t who = Wire.read();
+        // 0x68 on most boards; clones report 0x70/0x71/0x73. Anything
+        // that is not 0x00 or 0xFF proves a real device answered.
+        _alive     = (who != 0x00 && who != 0xFF);
+        _whoAmI    = who;
+        if (!_alive) { _mpuRejects++; return false; }
+    } else if (!_alive) {
+        return false;
+    }
 
-    // Adafruit library gives acceleration in m/s^2, gyro in rad/s.
-    // Convert acceleration to g and gyro to deg/s (dps).
-    constexpr float RAD_TO_DEG_F = 57.2957795f;
+    // ── Single 14-byte burst: accel(6) + temp(2) + gyro(6) ───────────
+    Wire.beginTransmission(_mpuAddr);
+    Wire.write(0x3B);
+    if (Wire.endTransmission(false) != 0) { _mpuBusFails++; return false; }
 
-    const float ax = a.acceleration.x / SENSORS_GRAVITY_STANDARD;
-    const float ay = a.acceleration.y / SENSORS_GRAVITY_STANDARD;
-    const float az = a.acceleration.z / SENSORS_GRAVITY_STANDARD;
-    const float gx = g.gyro.x * RAD_TO_DEG_F;
-    const float gy = g.gyro.y * RAD_TO_DEG_F;
-    const float gz = g.gyro.z * RAD_TO_DEG_F;
+    if (Wire.requestFrom((uint8_t)_mpuAddr, (uint8_t)14) != 14) {
+        // A short read is a genuine bus failure. Reported as such rather
+        // than parsed as data.
+        _mpuBusFails++;
+        return false;
+    }
 
-    // Reject all-zero or impossible readings
-    if (fabsf(ax) < 1e-4f && fabsf(ay) < 1e-4f && fabsf(az) < 1e-4f) return false;
+    uint8_t b[14];
+    for (uint8_t i = 0; i < 14; i++) b[i] = Wire.read();
+
+    // Big-endian signed 16-bit, exactly as laid out in the register map.
+    const int16_t rawAx = (int16_t)((b[0]  << 8) | b[1]);
+    const int16_t rawAy = (int16_t)((b[2]  << 8) | b[3]);
+    const int16_t rawAz = (int16_t)((b[4]  << 8) | b[5]);
+    const int16_t rawGx = (int16_t)((b[8]  << 8) | b[9]);
+    const int16_t rawGy = (int16_t)((b[10] << 8) | b[11]);
+    const int16_t rawGz = (int16_t)((b[12] << 8) | b[13]);
+
+    const float ax = rawAx / ACCEL_LSB_PER_G;
+    const float ay = rawAy / ACCEL_LSB_PER_G;
+    const float az = rawAz / ACCEL_LSB_PER_G;
+    const float gx = rawGx / GYRO_LSB_PER_DPS;
+    const float gy = rawGy / GYRO_LSB_PER_DPS;
+    const float gz = rawGz / GYRO_LSB_PER_DPS;
+
+    _mpuReads++;
+
+    // ── Sanity gate ───────────────────────────────────────────────────
+    // Rejects NaN and values past the configured full scale. It must NOT
+    // reject small readings: at rest on a bench the AC vibration can be
+    // well under 1 mg, and discarding that would report "no data" forever.
     if (!isfinite(ax) || !isfinite(ay) || !isfinite(az) ||
-        !isfinite(gx) || !isfinite(gy) || !isfinite(gz) ||
-        fabsf(ax) > MPU_ABS_LIMIT_G || fabsf(ay) > MPU_ABS_LIMIT_G ||
+        !isfinite(gx) || !isfinite(gy) || !isfinite(gz)) {
+        _mpuRejects++;
+        return false;
+    }
+    if (fabsf(ax) > MPU_ABS_LIMIT_G || fabsf(ay) > MPU_ABS_LIMIT_G ||
         fabsf(az) > MPU_ABS_LIMIT_G ||
         fabsf(gx) > MPU_ABS_LIMIT_DPS || fabsf(gy) > MPU_ABS_LIMIT_DPS ||
         fabsf(gz) > MPU_ABS_LIMIT_DPS) {
+        _mpuRejects++;
         return false;
     }
 
@@ -255,13 +336,23 @@ bool Sensors::sampleAmbient(float& outTempC, float& outHumidity,
                             uint32_t& outAgeMs) {
     if (!_dhtPresent) { outAgeMs = 0; return false; }
 
-    const float t = dht.readTemperature();
+    // ── ONE forced transaction, not two cached ones ───────────────────
+    // Adafruit's DHT library blocks ~250 ms per real conversion and
+    // caches for MIN_INTERVAL (2000 ms) internally. Calling
+    // readTemperature() and readHumidity() separately therefore performs
+    // the 250 ms conversion once and then spends another 250 ms
+    // re-reading the value it already has.
+    //
+    // `force = true` makes the first call perform the transaction and the
+    // second return instantly from the same conversion. Halves the block
+    // and removes a confusing cache layer from the picture.
+    const float t = dht.readTemperature(false, /*force=*/true);
     if (isnan(t) || t < -40.0f || t > 80.0f) {
         outAgeMs = _ambValid ? (millis() - _ambLastMs) : 0;
         return false;
     }
 
-    const float h = dht.readHumidity();
+    const float h = dht.readHumidity(/*force=*/false);
     if (isnan(h) || h < 0.0f || h > 100.0f) {
         outAgeMs = _ambValid ? (millis() - _ambLastMs) : 0;
         return false;
