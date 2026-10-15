@@ -69,6 +69,12 @@ public:
     // Reads the MPU6050 only. Returns false if absent or the read failed.
     bool readVibration(VibSample& out);
 
+    // Diagnostic counters. Distinguishes an I2C bus failure from a
+    // reading that was obtained but rejected as implausible — two very
+    // different hardware faults that otherwise look identical.
+    void mpuCounters(uint32_t& reads, uint32_t& busFails,
+                     uint32_t& rejects) const;
+
     // Non-blocking 1-Wire: starts conversion, reports whether it finished.
     // A 12-bit conversion takes ~750 ms, so this is called far more often
     // than the temperature actually changes.
@@ -119,6 +125,10 @@ private:
     uint8_t  _i2cFound = 0;
     uint8_t  _i2cAddr[8] = {0};
     bool     _fullScan  = false;
+
+    volatile uint32_t _mpuReads    = 0;   // getEvent() succeeded
+    volatile uint32_t _mpuBusFails = 0;   // getEvent() failed at the bus
+    volatile uint32_t _mpuRejects  = 0;   // read OK, but implausible
 
     uint32_t _dsLastMs    = 0;
     uint32_t _dsConvStart = 0;
