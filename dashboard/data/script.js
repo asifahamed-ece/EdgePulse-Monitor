@@ -28,6 +28,7 @@
     state: $("stateText"), rule: $("ruleText"),
     rms: $("vRms"), motor: $("vMotor"), amb: $("vAmb"),
     hum: $("vHum"), delta: $("vDelta"), hz: $("vHz"),
+    cur: $("vCur"), bus: $("vBus"),
     run: $("runId"), cond: $("cond"), pwm: $("pwm"), drop: $("drop"),
     calib: $("calib"), sensors: $("sensors"), rec: $("rec"),
     pwmOut: $("pwmOut"), pwmSlider: $("pwmSlider"),
@@ -113,6 +114,8 @@
     el.hum.textContent   = f(d.humidity, 1);
     el.delta.textContent = f(d.temp_delta_C, 1);
     el.hz.textContent    = f(d.fs_hz, 2);
+    el.cur.textContent   = f(d.current_A, 3);
+    el.bus.textContent   = f(d.bus_V, 2);
 
     el.run.textContent  = d.run  || "—";
     el.cond.textContent = d.cond || "—";
@@ -136,7 +139,7 @@
         pill("MPU6050", s.mpu6050) +
         pill("DS18B20", s.ds18b20) +
         pill("DHT22",   s.dht22) +
-        pill("INA219",  false);
+        pill("INA219",  s.ina219);
 
     // No measured baseline means no opinion, and the screen must say so.
     el.calib.textContent = d.calibrated
