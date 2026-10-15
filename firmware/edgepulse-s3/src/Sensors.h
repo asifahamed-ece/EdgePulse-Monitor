@@ -66,8 +66,19 @@ class Sensors {
 public:
     void begin();
 
-    // Reads the MPU6050 only. Returns false if absent or the read failed.
+    // Reads the MPU6050 only. Returns false if absent, if the burst
+    // transfer was short, or if the reading was implausible.
     bool readVibration(VibSample& out);
+
+    // Diagnostic counters. Distinguishes an I²C bus failure from a
+    // reading that arrived but was rejected — two very different hardware
+    // faults that otherwise look identical from the outside.
+    void mpuCounters(uint32_t& reads, uint32_t& busFails,
+                     uint32_t& rejects) const {
+        reads = _mpuReads; busFails = _mpuBusFails; rejects = _mpuRejects;
+    }
+    bool mpuAlive() const { return _alive; }
+    uint8_t mpuWhoAmI() const { return _whoAmI; }
 
     // Non-blocking 1-Wire: starts conversion, reports whether it finished.
     // A 12-bit conversion takes ~750 ms, so this is called far more often
@@ -119,6 +130,22 @@ private:
     uint8_t  _i2cFound = 0;
     uint8_t  _i2cAddr[8] = {0};
     bool     _fullScan  = false;
+
+    // MPU6050 diagnostics. These distinguish three genuinely different
+    // faults that otherwise look identical from the outside:
+    //   busFails — NAK, or a short read; the device is not answering
+    //   rejects  — data arrived but was implausible; sensor or wiring fault
+    //   alive    — WHO_AM_I no longer answers at all
+    volatile uint32_t _mpuReads    = 0;
+    volatile uint32_t _mpuBusFails = 0;
+    volatile uint32_t _mpuRejects  = 0;
+    bool     _alive          = false;
+    uint8_t  _whoAmI         = 0;
+    uint32_t _lastWhoCheckMs = 0;
+
+    // WHO_AM_I is polled this often: it proves the device is still on the
+    // bus without adding a transaction to every 100 Hz sample.
+    static constexpr uint32_t MPU_WHO_INTERVAL_MS = 10000;
 
     uint32_t _dsLastMs    = 0;
     uint32_t _dsConvStart = 0;
