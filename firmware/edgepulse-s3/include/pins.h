@@ -46,6 +46,20 @@ static constexpr uint8_t  PIN_L298_IN1  = 17;  // direction
 static constexpr uint8_t  PIN_L298_IN2  = 18;  // direction
 static constexpr uint32_t MOTOR_PWM_HZ  = 16000;
 
+// ── INA219 — current, in SERIES with the motor ───────────────────────
+// Shares the I²C bus above at 0x40. It does not need its own pins.
+//
+// ⚠️ WIRING HAZARD: many INA219 breakouts pull SDA/SCL up to VIN, not
+// VCC. In series with the motor, VIN IS THE 12 V BUS — those pull-ups
+// would put 12 V on GPIO 8/9 and destroy the S3. With the 12 V adapter
+// DISCONNECTED, measure SDA-to-VIN. If it reads open, remove the two
+// onboard resistors and fit 4.7 kΩ to 3.3 V. See src/Ina219.h.
+static constexpr uint8_t  INA219_I2C_ADDR = 0x40;
+
+// Shunt resistor value marked on YOUR breakout. 0.1 Ω and 0.2 Ω are both
+// common; a wrong value makes every current reading confidently wrong.
+static constexpr float    INA219_SHUNT_OHMS = 0.1f;
+
 // ── Status outputs ─────────────────────────────────────────────────────
 // Onboard LED on the DevKitC-1 is GPIO48 (driven LOW for on).
 // Buzzer goes through a 2N2222 with a flyback diode — never driven
@@ -53,6 +67,39 @@ static constexpr uint32_t MOTOR_PWM_HZ  = 16000;
 static constexpr uint8_t PIN_LED        = 48;
 static constexpr uint8_t PIN_LED_ACTIVE = 0;   // 0 = active-low
 static constexpr uint8_t PIN_BUZZER     = 16;
+
+// ── TFT status display — ST7789 over SPI  ·  OPTIONAL ─────────────────
+// Whole feature is behind EDGE_TFT_ENABLED (see src/TftDisplay.h), which
+// defaults to 0. These pins exist on paper only until it is switched on.
+//
+// SCLK / MOSI / MISO are the ESP32-S3 FSPI native pins. They are used
+// rather than matrixed alternatives because the GPIO matrix detour costs
+// throughput, and the TFT is the only SPI device in the build.
+//
+// CS is GPIO5, deliberately NOT GPIO9. GPIO9 is this project's I²C SCL
+// (PIN_I2C_SCL above) and is about to carry the INA219 as well; a second
+// device on that line would be a hard conflict, not a shared one. GPIO5 is
+// free, is not a strapping pin, and is well outside the flash/PSRAM bank.
+//
+// DC is GPIO10, which is the controller's FSPICS0 pin. It is safe to use
+// as data/command because the driver drives CS itself and never attaches
+// the peripheral's hardware SS (Adafruit_SPITFT only calls setHwCs() when
+// a transaction declares use_ss, and SPISettings(freq, MSBFIRST, mode)
+// never does). Using the native CS0 pin as DC also leaves the panel's
+// chip-select entirely in software, where it can be seen.
+//
+// RST is GPIO21 and BL is GPIO14. BL is the only optional wire here: many
+// breakouts strap the backlight to 3V3 directly, and EDGE_TFT_BACKLIGHT=0
+// in TftDisplay.h turns the drive off for those.
+static constexpr uint8_t PIN_TFT_SCLK = 12;
+static constexpr uint8_t PIN_TFT_MOSI = 11;
+static constexpr uint8_t PIN_TFT_MISO = 13;  // unused by the driver today; wire
+                                           // it anyway so the panel is
+                                           // complete for a later readback
+static constexpr uint8_t PIN_TFT_DC   = 10;
+static constexpr uint8_t PIN_TFT_CS   = 5;
+static constexpr uint8_t PIN_TFT_RST  = 21;
+static constexpr uint8_t PIN_TFT_BL   = 14;
 
 // ── RESERVED — do not assign ──────────────────────────────────────────
 // GPIO19 / GPIO20 are USB D− / D+ for the native USB CDC interface.
@@ -68,5 +115,12 @@ static constexpr uint32_t WINDOW_MS      = (WINDOW_SAMPLES * 1000) / HZ;
 
 // ── Slow-sensor intervals ─────────────────────────────────────────────
 // Real sensor periods. Never pretend these are 100 Hz.
+//
+// The DHT22 interval must be SHORTER than the feature window. With both
+// at 2000 ms, dhtTask and featureTask wake on the same boundary;
+// featureTask runs first (higher priority, different core) and publishes
+// the ambient cache before dhtTask has refreshed it, so roughly half the
+// windows carry a stale or empty ambient/humidity reading. 1200 ms gives
+// a guaranteed 800 ms margin before each 2000 ms window.
 static constexpr uint32_t DS18B20_INTERVAL_MS = 800;   // 12-bit conversion
-static constexpr uint32_t DHT22_INTERVAL_MS   = 2000;  // sensor minimum
+static constexpr uint32_t DHT22_INTERVAL_MS   = 1200;  // < WINDOW_MS, see note
