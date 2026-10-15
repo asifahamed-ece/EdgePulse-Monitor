@@ -22,10 +22,15 @@ struct Features {
     float vib_variance;
     float vib_peak_to_peak;
 
-    // current — deferred with the INA219; NaN, never 0
+    // current — populated only when the INA219 actually measured.
+    // NaN (never 0) while the sensor is absent or its reading was
+    // rejected, which keeps the CSV column blank and the dashboard tile
+    // showing "—" rather than a false 0.000.
     float current_mean_A;
     float current_rms_A;
     float current_variance;
+    float bus_V;
+    float power_W;
 
     // temperatures and humidity, last valid values in the window
     float motor_temp_C;
@@ -59,6 +64,7 @@ public:
                  bool haveMotorTemp, float motorTempC,
                  bool haveAmbient, float ambientTempC, float humidityPct,
                  bool haveCurrent, float currentA,
+                 float busV, float watts,
                  Features& out);
 
     uint16_t count() const { return _n; }
