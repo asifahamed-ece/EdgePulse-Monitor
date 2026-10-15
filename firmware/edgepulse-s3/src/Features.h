@@ -64,10 +64,10 @@ public:
     uint16_t count() const { return _n; }
 
 private:
-    float _sumSq  = 0.0f;   // Σ ac², for RMS and variance
-    float _sumAbs = 0.0f;   // for mean-absolute deviation as a cross-check
-    float _peak   = 0.0f;
-    float _min    = 0.0f;
-    float _max    = 0.0f;
-    uint16_t _n   = 0;
+    double   _sumSq  = 0.0;   // Σ ac², for RMS and variance (double precision avoids cancellation)
+    double   _sumAbs = 0.0;   // for mean-absolute deviation
+    float    _peak   = 0.0f;
+    float    _min    = 0.0f;
+    float    _max    = 0.0f;
+    uint16_t _n      = 0;
 };
