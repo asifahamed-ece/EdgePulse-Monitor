@@ -24,6 +24,7 @@ void FeatureExtractor::compute(uint16_t windowSamples, uint16_t windowMs,
                                bool haveAmbient, float ambientTempC,
                                float humidityPct,
                                bool haveCurrent, float currentA,
+                               float busV, float watts,
                                Features& out) {
     // Start from "no data". Every field below is explicitly assigned only
     // when its inputs were actually measured.
@@ -33,6 +34,8 @@ void FeatureExtractor::compute(uint16_t windowSamples, uint16_t windowMs,
     out.current_mean_A   = NAN;
     out.current_rms_A    = NAN;
     out.current_variance = NAN;
+    out.bus_V            = NAN;
+    out.power_W          = NAN;
     out.motor_temp_C     = NAN;
     out.ambient_temp_C   = NAN;
     out.humidity_pct     = NAN;
@@ -66,13 +69,17 @@ void FeatureExtractor::compute(uint16_t windowSamples, uint16_t windowMs,
     if (isfinite(humidityPct))                  out.humidity_pct = humidityPct;
 
     // ── Current ────────────────────────────────────────────────────────
-    // Populated only when the CurrentSensor actually measured. With the
-    // INA219 deferred these three stay NaN, and the CSV columns stay blank.
+    // Populated only when the CurrentSensor actually measured. A single
+    // instantaneous sample is carried per window; mean/RMS/variance are
+    // refined once the current is accumulated over the window rather than
+    // sampled once at its end.
     if (haveCurrent && isfinite(currentA)) {
         out.current_mean_A = currentA;
-        out.current_rms_A  = currentA;   // single instantaneous sample per
-        out.current_variance = 0.0f;     // window; refined when wired
+        out.current_rms_A  = currentA;
+        out.current_variance = 0.0f;
     }
+    if (isfinite(busV))  out.bus_V  = busV;
+    if (isfinite(watts)) out.power_W = watts;
 
     // A temperature rise above ambient is only meaningful when both
     // sides were actually measured. One missing sensor means no delta —
