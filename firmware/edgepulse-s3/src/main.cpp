@@ -78,6 +78,7 @@ static float    gHz            = 0.0f;
 // Latest feature row, for the dashboard and the debug line.
 static Features gFeat{};
 static uint32_t gFeatSeq = 0;
+static VibSample gLatestVib{};
 
 // ── FreeRTOS handles ───────────────────────────────────────────────────
 static QueueHandle_t   qFeature;      // Features  → task_rules
@@ -104,6 +105,7 @@ static void acqTask(void*) {
         VibSample vs;
         f.have_vib = sensors.readVibration(vs);
         if (f.have_vib) {
+            gLatestVib = vs;
             f.ax = vs.ax; f.ay = vs.ay; f.az = vs.az;
             f.gx = vs.gx; f.gy = vs.gy; f.gz = vs.gz;
             extractor.addSample(vs.ax, vs.ay, vs.az);
@@ -136,13 +138,12 @@ static void acqTask(void*) {
         if (f.have_motor_temp)          status |= SENSOR_DS18B20;
         if (f.have_ambient)             status |= SENSOR_DHT22;
         if (f.have_current)             status |= SENSOR_CURRENT;
-        f.sensor_status = status;
-        f.dropped_samples = acqTicks - acqDone;
+        f.dropped_samples = (acqTicks > acqDone) ? (acqTicks - acqDone) : 0;
 
         if (gRecording) csv.writeFrame(f);
 
         acqDone++;
-        gDropped = acqTicks - acqDone;
+        gDropped = (acqTicks > acqDone) ? (acqTicks - acqDone) : 0;
     }
 }
 
@@ -328,10 +329,11 @@ static void debugTask(void*) {
                       (double)gHz, (unsigned long)gDropped,
                       statusName(gStatus), gHit.feature);
 
-        Serial.printf("[DBG] vib_rms=%s pp=%s motor=%s°C age=%lums "
+        Serial.printf("[DBG] vib_rms=%s pp=%s raw=[%.2f,%.2f,%.2f]g motor=%s°C age=%lums "
                       "amb=%s°C hum=%s%% pwm=%u running=%d\n",
                       isfinite(f.vib_rms) ? String((double)f.vib_rms, 4).c_str() : "n/a",
                       isfinite(f.vib_peak_to_peak) ? String((double)f.vib_peak_to_peak, 4).c_str() : "n/a",
+                      gLatestVib.ax, gLatestVib.ay, gLatestVib.az,
                       haveM ? String((double)mt, 2).c_str() : "n/a",
                       (unsigned long)mage,
                       haveA ? String((double)amb, 2).c_str() : "n/a",
@@ -362,9 +364,15 @@ static void cmdSetMotor(uint8_t speed, uint8_t dir) {
     Serial.printf("[MOTOR] pwm=%u dir=%u duty=%u running=%d\n",
                   speed, dir, motor.duty(), (int)motor.running());
 }
-static void cmdRunMotor(void)  { motor.run();  gMotorRun = 1; Serial.println("[MOTOR] RUN"); }
+static void cmdRunMotor(void)  {
+    if (motor.duty() == 0) motor.setSpeed(128, 0);
+    motor.run();
+    gMotorRun = 1;
+    gMotorPwm = motor.duty();
+    Serial.printf("[MOTOR] RUN (duty=%u)\n", motor.duty());
+}
 static void cmdStopMotor(void) { motor.stop(); gMotorRun = 0; gMotorPwm = 0; Serial.println("[MOTOR] STOP"); }
-static void cmdBrakeMotor(void){ motor.brake(); gMotorRun = 0; Serial.println("[MOTOR] BRAKE"); }
+static void cmdBrakeMotor(void){ motor.brake(); gMotorRun = 0; gMotorPwm = 0; Serial.println("[MOTOR] BRAKE"); }
 
 // ═══════════════════════════════════════════════════════════════════════
 //  SETUP
@@ -520,13 +528,42 @@ void setup() {
 }
 
 void loop() {
-    // All work happens in FreeRTOS tasks. loop() exists only so the
-    // Arduino framework does not panic, and to blink the LED as a
-    // heartbeat that proves the scheduler is alive.
     static uint32_t lastLed = 0;
     if (millis() - lastLed >= 1000) {
         lastLed = millis();
         digitalWrite(PIN_LED, motor.running() ? !PIN_LED_ACTIVE : PIN_LED_ACTIVE);
     }
+
+    while (Serial.available()) {
+        String line = Serial.readStringUntil('\n');
+        line.trim();
+        if (line.length() == 0) continue;
+        if (line.equalsIgnoreCase("RUN")) {
+            cmdRunMotor();
+        } else if (line.equalsIgnoreCase("STOP")) {
+            cmdStopMotor();
+        } else if (line.equalsIgnoreCase("BRAKE")) {
+            cmdBrakeMotor();
+        } else if (line.startsWith("PWM ") || line.startsWith("pwm ") || line.startsWith("M ") || line.startsWith("m ")) {
+            int val = line.substring(line.indexOf(' ') + 1).toInt();
+            if (val >= 0 && val <= 255) {
+                cmdSetMotor((uint8_t)val, 0);
+                if (!motor.running()) cmdRunMotor();
+            } else {
+                Serial.println("[CMD] PWM must be 0..255");
+            }
+        } else if (line.equalsIgnoreCase("START")) {
+            csv.beginRun(gRunId, gCondition);
+            gRecording = true;
+            Serial.printf("[CMD] Recording START run=%s cond=%s\n", gRunId, gCondition);
+        } else if (line.equalsIgnoreCase("END")) {
+            csv.endRun();
+            gRecording = false;
+            Serial.println("[CMD] Recording STOPPED");
+        } else if (line.equalsIgnoreCase("HELP")) {
+            Serial.println("[CMD] Available commands: RUN, STOP, BRAKE, PWM <0-255>, START, END");
+        }
+    }
+
     vTaskDelay(pdMS_TO_TICKS(20));
 }
