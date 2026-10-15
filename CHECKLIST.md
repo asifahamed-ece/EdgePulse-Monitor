@@ -1,5 +1,64 @@
 # EdgePulse — Working Checklist
 
+> ## ⏸️ PAUSED as of 2026-10-15
+>
+> The hackathon ended. **1st runner-up**, 8-hour build, AI-accelerated.
+> Development is stopping here and the project may be inactive for a while.
+>
+> ### State at pause
+>
+> `main` is clean and synced with `origin`. A fresh `git clone` builds to
+> `[SUCCESS]` in ~36 s with no hardware attached. Nothing is left uncommitted.
+>
+> ### Verified on real hardware before pausing
+>
+> | | Evidence |
+> |---|---|
+> | 100 Hz acquisition | `hz=100.0`, `drop=0`, 200/200 samples per window |
+> | MPU6050 | answers at `0x68`, WHO_AM_I confirmed |
+> | DS18B20 | live motor temperature, ~31.7 °C with correct staleness |
+> | DHT22 | ambient temperature and humidity |
+> | INA219 | driver written and compiling — **not yet confirmed on hardware** |
+> | Dashboard | live values, charts, motor control, served over SoftAP |
+>
+> ### Known incomplete — do not mistake these for done
+>
+> 1. **`tools/` does not exist.** No host-side feature extractor, no baseline
+>    calibration script, no threshold validation. The firmware can record a
+>    dataset that nothing currently analyses. **This is the first thing to
+>    build on resumption.**
+> 2. **No threshold baseline exists yet.** `src/baseline.h` is deliberately
+>    empty of numbers, so the status reports `UNCALIBRATED`. That is honest,
+>    not a bug — do not "fix" it with invented values.
+> 3. **No experiments have been run.** Experiment A (normal baseline, ≥3
+>    runs) and Experiment B (speed variation) are still outstanding, and
+>    Experiment C remains out of scope without a real load fixture.
+> 4. **Hardware safety gate G2 is still open.** The motor's current draw has
+>    never been measured with the driver disconnected. Until it is, do not
+>    power the motor.
+> 5. **TFT display is unverified.** It compiles and is feature-gated off by
+>    default (`EDGE_TFT_ENABLED`); no board has been connected to it.
+>
+> ### First three steps when this resumes
+>
+> 1. Wire the MPU6050 and confirm the vibration trace **moves**. Data recorded
+>    before the register-burst fix (commit `483adec`) was reading stale stack
+>    memory and must be discarded.
+> 2. Build `tools/extract_features.py` so the on-device features can be
+>    recomputed and cross-checked against the firmware (gate G4).
+> 3. Record ≥3 NORMAL runs, then generate a real `baseline.h` from them.
+>
+> ### Last known-good hardware state
+>
+> ESP32-S3 DevKitC-1, `board = esp32-s3-devkitc-1`, Arduino via PlatformIO.
+> Flash with `pio run -t uploadfs && pio run -t upload` from
+> `firmware/edgepulse-s3`. The board enumerates as
+> `/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_*`; the exact
+> `ttyACM` number shifts between reboots, so pass `--upload-port` rather than
+> hardcoding it.
+
+---
+
 **Project:** EdgePulse — Multisensor Edge-Based Anomaly Detection for DC Motor Health Monitoring
 **Team:** Axioms
 **Last updated:** 2026-10-15 (after full firmware implementation)
