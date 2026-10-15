@@ -47,14 +47,14 @@ void FeatureExtractor::compute(uint16_t windowSamples, uint16_t windowMs,
     // Require at least half the nominal window so a window truncated by a
     // dropout is reported invalid rather than silently under-counted.
     if (n >= windowSamples / 2 && n > 0) {
-        const float nF = (float)n;
-        const float mean = _sumAbs / nF;
+        const double nF = (double)n;
+        const double mean = _sumAbs / nF;
 
         // AC component: variance of (mag - mean), RMS of the same.
-        const float var = (_sumSq / nF) - (mean * mean);
+        const double var = (_sumSq / nF) - (mean * mean);
 
-        out.vib_rms = sqrtf(var > 0.0f ? var : 0.0f);
-        out.vib_variance = var;
+        out.vib_rms = sqrtf((float)(var > 0.0 ? var : 0.0));
+        out.vib_variance = (float)(var > 0.0 ? var : 0.0);
         out.vib_peak_to_peak = _max - _min;
         out.valid = true;
     }
